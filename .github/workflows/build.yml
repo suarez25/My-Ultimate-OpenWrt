@@ -69,7 +69,7 @@ jobs:
           make -j$(nproc) || make -j1 V=s
 
       - name: 上传固件
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: Ultimate-x86-Firmware
           path: openwrt/bin/targets/x86/64/*-combined-efi.img.gz
