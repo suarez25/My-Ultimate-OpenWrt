@@ -17,22 +17,20 @@ jobs:
 
       - name: 拉取源码
         run: |
+          # 使用 ImmortalWrt 源码
           git clone --depth 1 https://github.com/immortalwrt/immortalwrt openwrt
 
       - name: 更新并安装 Feeds
         run: |
           cd openwrt
-          # 1. 注入源 (使用更稳定的 https 地址)
-          echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git" >> feeds.conf.default
-          echo "src-git passwall_packages https://github.com/xiaorouji/openwrt-passwall-packages.git" >> feeds.conf.default
-          
-          # 2. 更新源
+          # 1. 先更新自带的 Feeds (ImmortalWrt 通常自带了 Passwall 和常用插件)
           ./scripts/feeds update -a
-          
-          # 3. 【核心修正】先单独安装 passwall 的依赖，再安装全部
-          ./scripts/feeds install -p passwall_packages -a
-          ./scripts/feeds install -p passwall -a
           ./scripts/feeds install -a
+          
+          # 2. 如果你需要特定版本的 Passwall 且发生冲突，这行命令会强制覆盖：
+          # sed -i '/src-git passwall/d' feeds.conf.default || true
+          # echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git" >> feeds.conf.default
+          # ./scripts/feeds update passwall && ./scripts/feeds install -a
 
       - name: 注入配置与初始化脚本
         run: |
@@ -52,14 +50,14 @@ jobs:
       - name: 生成配置文件 (defconfig)
         run: |
           cd openwrt
-          # 【双重保险】清理可能导致 find 报错的无效链接，并强制创建目录
-          find feeds/ -maxdepth 2 -type l -delete || true
-          mkdir -p feeds/passwall
+          # 清理临时文件，这是解决 Exit Code 1 的关键
+          rm -rf tmp/
           
           cat <<EOF > .config
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
           CONFIG_TARGET_x86_64_DEVICE_generic=y
+          # ImmortalWrt 里的包名可能略有不同，先确保基础配置
           CONFIG_PACKAGE_luci-app-passwall=y
           CONFIG_PACKAGE_luci-app-openclash=y
           CONFIG_PACKAGE_luci-app-adguardhome=y
@@ -77,7 +75,7 @@ jobs:
           CONFIG_TARGET_ROOTFS_PARTSIZE=2048
           EOF
           
-          # 运行编译前的配置修复
+          # 执行强制重置配置
           make defconfig
 
       - name: 预下载依赖包
@@ -88,7 +86,6 @@ jobs:
       - name: 开始编译
         run: |
           cd openwrt
-          # 这里的顺序：先编译工具链，再编译固件，减少报错几率
           make -j$(nproc) || make -j1 V=s
 
       - name: 上传固件
