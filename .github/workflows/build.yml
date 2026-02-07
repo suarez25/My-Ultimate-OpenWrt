@@ -7,30 +7,36 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v3
+      - name: 检出源码
+        uses: actions/checkout@v4
 
-      - name: 释放磁盘空间 & 安装编译环境
+      - name: 极致空间清理 (腾出30GB+)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 安装编译环境
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo apt-get update
           sudo apt-get install -y build-essential clang flex bison g++ gawk gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget
+          sudo apt-get autoremove --purge
+          sudo apt-get clean
 
       - name: 拉取源码
         run: |
-          # 使用 ImmortalWrt 源码
           git clone --depth 1 https://github.com/immortalwrt/immortalwrt openwrt
 
       - name: 更新并安装 Feeds
         run: |
           cd openwrt
-          # 1. 先更新自带的 Feeds (ImmortalWrt 通常自带了 Passwall 和常用插件)
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          
-          # 2. 如果你需要特定版本的 Passwall 且发生冲突，这行命令会强制覆盖：
-          # sed -i '/src-git passwall/d' feeds.conf.default || true
-          # echo "src-git passwall https://github.com/xiaorouji/openwrt-passwall.git" >> feeds.conf.default
-          # ./scripts/feeds update passwall && ./scripts/feeds install -a
 
       - name: 注入配置与初始化脚本
         run: |
@@ -50,14 +56,11 @@ jobs:
       - name: 生成配置文件 (defconfig)
         run: |
           cd openwrt
-          # 清理临时文件，这是解决 Exit Code 1 的关键
           rm -rf tmp/
-          
           cat <<EOF > .config
           CONFIG_TARGET_x86=y
           CONFIG_TARGET_x86_64=y
           CONFIG_TARGET_x86_64_DEVICE_generic=y
-          # ImmortalWrt 里的包名可能略有不同，先确保基础配置
           CONFIG_PACKAGE_luci-app-passwall=y
           CONFIG_PACKAGE_luci-app-openclash=y
           CONFIG_PACKAGE_luci-app-adguardhome=y
@@ -72,24 +75,41 @@ jobs:
           CONFIG_PACKAGE_luci-app-zerotier=y
           CONFIG_PACKAGE_luci-theme-argon=y
           CONFIG_TARGET_KERNEL_PARTSIZE=256
-          CONFIG_TARGET_ROOTFS_PARTSIZE=2048
+          CONFIG_TARGET_ROOTFS_PARTSIZE=1024
           EOF
-          
-          # 执行强制重置配置
           make defconfig
 
       - name: 预下载依赖包
         run: |
           cd openwrt
           make download -j8
+          find dl -size -1024c -exec rm -f {} \;
+          make download -j8
 
       - name: 开始编译
         run: |
           cd openwrt
-          make -j$(nproc) || make -j1 V=s
+          df -h
+          # 执行编译。如果失败，自动清理最占空间的 build_dir 目录并退出
+          make -j$(nproc) || (rm -rf build_dir && make -j1 V=s)
+
+      - name: 整理固件文件
+        if: success()
+        run: |
+          cd openwrt/bin/targets/x86/64/
+          rm -rf packages
+          echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
 
       - name: 上传固件
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Ultimate-x86-Firmware
-          path: openwrt/bin/targets/x86/64/*-combined-efi.img.gz
+          name: ImmortalWrt-x86-64
+          path: ${{ env.FIRMWARE_PATH }}/*-combined-efi.img.gz
+          retention-days: 1
+
+      - name: 编译失败清理
+        if: failure()
+        run: |
+          df -h
+          echo "编译失败，已自动触发临时文件清理以保护 GitHub 运行器磁盘。"
