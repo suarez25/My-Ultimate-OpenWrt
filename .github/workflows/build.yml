@@ -1,115 +1,145 @@
-name: One-Click Build x86_64
+name: Optimized OpenWrt Build x86_64
 
 on:
+  repository_dispatch:
   workflow_dispatch:
+
+env:
+  REPO_URL: https://github.com/coolsnowwolf/lede
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: false
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
 
 jobs:
   build:
     runs-on: ubuntu-22.04
+    # 设置超时时间，虽然上限是360，但设定后能更早发现问题
+    timeout-minutes: 360 
+
     steps:
-      - name: 检出源码
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v3
 
-      - name: 极致空间清理 (腾出30GB+)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
+    - name: Free Disk Space (增加可用空间)
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: true
 
-      - name: 安装编译环境
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang flex bison g++ gawk gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget
-          sudo apt-get autoremove --purge
-          sudo apt-get clean
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo -E apt-get -qq update
+        sudo -E apt-get -qq install $(curl -fsSL https://is.gd/depends_ubuntu_2204)
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
 
-      - name: 拉取源码
-        run: |
-          git clone --depth 1 https://github.com/immortalwrt/immortalwrt openwrt
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
-      - name: 更新并安装 Feeds
-        run: |
-          cd openwrt
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+    - name: Cache (开启缓存，这是不超时的关键)
+      uses: actions/cache@v3
+      with:
+        path: |
+          openwrt/staging_dir
+          openwrt/build_dir/host
+          openwrt/build_dir/toolchain
+          openwrt/dl
+        key: ${{ runner.os }}-openwrt-${{ hashFiles('**/.config') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-
 
-      - name: 注入配置与初始化脚本
-        run: |
-          cd openwrt
-          sed -i 's/192.168.1.1/192.168.10.1/g' package/base-files/files/bin/config_generate
-          
-          mkdir -p package/base-files/files/etc/uci-defaults
-          cat <<EOF > package/base-files/files/etc/uci-defaults/99-init
-          #!/bin/sh
-          uci set unblockneteasemusic.@main[0].enabled='1'
-          uci set unblockneteasemusic.@main[0].unblock_way='viasocksproxy'
-          uci commit unblockneteasemusic
-          exit 0
-          EOF
-          chmod +x package/base-files/files/etc/uci-defaults/99-init
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && cp $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
 
-      - name: 生成配置文件 (defconfig)
-        run: |
-          cd openwrt
-          rm -rf tmp/
-          cat <<EOF > .config
-          CONFIG_TARGET_x86=y
-          CONFIG_TARGET_x86_64=y
-          CONFIG_TARGET_x86_64_DEVICE_generic=y
-          CONFIG_PACKAGE_luci-app-passwall=y
-          CONFIG_PACKAGE_luci-app-openclash=y
-          CONFIG_PACKAGE_luci-app-adguardhome=y
-          CONFIG_PACKAGE_luci-app-mosdns=y
-          CONFIG_PACKAGE_luci-app-unblockneteasemusic=y
-          CONFIG_PACKAGE_luci-app-dockerman=y
-          CONFIG_PACKAGE_luci-app-portainer=y
-          CONFIG_PACKAGE_luci-app-alist=y
-          CONFIG_PACKAGE_luci-app-filebrowser=y
-          CONFIG_PACKAGE_luci-app-samba4=y
-          CONFIG_PACKAGE_luci-app-tailscale=y
-          CONFIG_PACKAGE_luci-app-zerotier=y
-          CONFIG_PACKAGE_luci-theme-argon=y
-          CONFIG_TARGET_KERNEL_PARTSIZE=256
-          CONFIG_TARGET_ROOTFS_PARTSIZE=1024
-          EOF
-          make defconfig
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
 
-      - name: 预下载依赖包
-        run: |
-          cd openwrt
-          make download -j8
-          find dl -size -1024c -exec rm -f {} \;
-          make download -j8
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
 
-      - name: 开始编译
-        run: |
-          cd openwrt
-          df -h
-          # 执行编译。如果失败，自动清理最占空间的 build_dir 目录并退出
-          make -j$(nproc) || (rm -rf build_dir && make -j1 V=s)
+    - name: Load custom configuration
+      run: |
+        [ -e $CONFIG_FILE ] && cp $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
+        
+        # 自动瘦身：强行关闭 GRUB 里那些没用的文件系统，防止最后阶段卡死
+        sed -i 's/CONFIG_GRUB_IMAGES=y/CONFIG_GRUB_IMAGES=y/g' .config
+        echo "CONFIG_GRUB_EFI_IMAGES=y" >> .config
+        # 以下是针对你上次卡住的地方进行的强行瘦身
+        echo "# CONFIG_GRUB_FS_MINIX is not set" >> .config
+        echo "# CONFIG_GRUB_FS_HFS is not set" >> .config
+        echo "# CONFIG_GRUB_FS_JFS is not set" >> .config
+        echo "# CONFIG_GRUB_FS_XFS is not set" >> .config
 
-      - name: 整理固件文件
-        if: success()
-        run: |
-          cd openwrt/bin/targets/x86/64/
-          rm -rf packages
-          echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
 
-      - name: 上传固件
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ImmortalWrt-x86-64
-          path: ${{ env.FIRMWARE_PATH }}/*-combined-efi.img.gz
-          retention-days: 1
+    - name: Compile the firmware (多线程加速编译)
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        # 第一次尝试全速编译，如果失败则输出详细日志
+        make -j$(nproc) || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep "grep" -rl ./
 
-      - name: 编译失败清理
-        if: failure()
-        run: |
-          df -h
-          echo "编译失败，已自动触发临时文件清理以保护 GitHub 运行器磁盘。"
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
+
+    - name: Upload bin directory
+      uses: actions/upload-artifact@v3
+      if: steps.compile.outputs.status == 'success' && env:UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
+
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@v3
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
